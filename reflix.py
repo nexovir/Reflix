@@ -1239,13 +1239,46 @@ async def fuzz_one_url(url, method):
         await run_nuclei_scan(candidate_url, method, headers, None, parameter, proxy)
 
 
-async def fuzz_phase(urls, methods):
-    """PHASE 2 driver - only runs against the fuzzable subset (binary assets
-    and static .js/.css/.map files were already filtered out by main(), since
-    query params on those never reflect anything no matter what's sent)."""
-    tasks = [sem_task(fuzz_one_url(url, method)) for url in urls for method in methods]
-    await run_phase(tasks, "Reflection Fuzz")
+async def discover_and_fuzz_one(url, methods):
+    """Combined Phase 1+2 for a single URL, run back-to-back in one task
+    instead of as two separate global phases. fallparams runs once for
+    this URL, and fuzzing starts immediately afterwards using just the
+    parameters discovered on THIS url (+ -w seed) - there is no need to
+    wait for every other URL's discovery to finish first.
 
+    discovered_parameters / discovered_by_url are still updated here as a
+    side effect of discover_one(), so by the time every URL's task has
+    completed, the global union is complete - exactly what Heavy Reflix
+    (-hv) needs for its cross-pollination pass, which still runs AFTER
+    this whole phase, not interleaved with it.
+
+    Static JS/CSS/map files still go through discovery only (real param
+    names often live in JS source) but are skipped for fuzzing, same
+    behavior as before - is_fuzzable() gates that here instead of via a
+    separately filtered url list.
+    """
+    await discover_one(url, 'GET')
+    if is_fuzzable(url):
+        for method in methods:
+            await fuzz_one_url(url, method)
+
+
+async def discover_and_fuzz_phase(urls, methods):
+    """Driver for the combined phase above. Replaces the old back-to-back
+    discovery_phase(urls, ['GET']) + fuzz_phase(fuzzable_urls, methods)
+    calls with ONE phase, one task per URL - so there's no artificial
+    barrier forcing the entire URL list to finish discovery before the
+    first fuzz request goes out. Net effect: same total requests sent,
+    just no longer front-loaded into two sequential global passes."""
+    tasks = [sem_task(discover_and_fuzz_one(url, methods)) for url in urls]
+    await run_phase(
+        tasks, "Discover & Fuzz",
+        desc_override="running fallparams per URL, then immediately fuzzing it with what was found"
+    )
+    if not silent:
+        print(f"  {dim}→ {len(discovered_parameters)} unique parameter(s) found across "
+              f"{len(discovered_by_url)}/{len(urls)} URL(s){reset}")
+              
 
 async def heavy_one(url, method):
     """Cross-pollination fuzz: test THIS url against the full UNION of every
@@ -1418,15 +1451,10 @@ async def main():
 
         # PHASE 1: discover real parameters on every non-binary URL (incl.
         # .js/.css - fallparams pulls real API/param names out of JS source).
-        await discovery_phase(urls, ['GET'])
-
-        # Optional recon: DOM source/sink keyword scan.
         if dom:
             await dom_scan_phase(urls)
 
-        # PHASE 2: reflection fuzz - only the fuzzable subset, using each
-        # url's own discovered params (+ -w seed) rather than a fake canary.
-        await fuzz_phase(fuzzable_urls, methods)
+        await discover_and_fuzz_phase(urls, methods)
 
         if pathinjection:
             await path_injection_reflix(fuzzable_urls, methods, parameter)

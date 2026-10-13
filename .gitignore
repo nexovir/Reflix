@@ -6,6 +6,7 @@ dist/
 __pycache__/
 *.pyc
 *.pyo
+temp.*
 
 # --- Virtual environment ---
 venv/
