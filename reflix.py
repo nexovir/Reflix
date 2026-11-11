@@ -965,11 +965,13 @@ async def try_to_xss(url: str, method, reflection_place):
         lowered_html = html.lower()
         for inject_elm in INJECTION_RESULTS:
             if inject_elm in lowered_html:
+                # For ' and " (not >): skip if the match is backslash-escaped
+                if inject_elm[0] in ('"', "'") and ('\\' + inject_elm) in lowered_html:
+                    continue
                 content_type, size_page = extract_meta(html, resp_headers)
                 await record_finding(method, "medium", reflection_place, target_url,
                                       content_type=content_type, size_page=size_page)
                 break
-
 
 async def run_nuclei_scan(target_url, method='GET', req_headers=None, post_data=None, search_word="nexovir",
                            proxy_=''):
